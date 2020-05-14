@@ -2,7 +2,7 @@
 ===================================================================================
 
 ## jenkinsfiles： 
-+ 典型的jenkinsfile发出来给大家分享下。 
++ 典型的jenkinsfile发出来给大家分享下。   
 |  FILE   | Description  |
 |  ----  | ----  |
 | main.jenkinsfile  | 主要jenkinsfile文件，微服务程序部署 |
