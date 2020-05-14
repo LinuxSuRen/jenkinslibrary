@@ -3,12 +3,12 @@
 
 ## jenkinsfiles： 
 + 典型的jenkinsfile发出来给大家分享下。   
-|  FILE   | Description  |
-|  ----  | ----  |
-| main.jenkinsfile  | 主要jenkinsfile文件，微服务程序部署 |
-| mavenInstall.jenkinsfile  | 依赖包打包 |
-| staticWebsite.jenkinsfile  | 静态页面更新至nginx下，并reload |
-| npmWebsite.jenkinsfile  | npm 前端项目构建，并打包放置到nginx下 |
+|  FILE   | Description  |  
+|  ----  | ----  |  
+| main.jenkinsfile  | 主要jenkinsfile文件，微服务程序部署 |  
+| mavenInstall.jenkinsfile  | 依赖包打包 |  
+| staticWebsite.jenkinsfile  | 静态页面更新至nginx下，并reload |  
+| npmWebsite.jenkinsfile  | npm 前端项目构建，并打包放置到nginx下 |  
 
 ## resources：  这属于共享库代码，需要在系统中配置共享库地址及名称
 ### resources中根据目录区分项目环境，例如生产prod，预生产preprod等
