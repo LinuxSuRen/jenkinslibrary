@@ -1,0 +1,72 @@
+#!groovy
+@Library("jenkinslibrary") _    //jenkins: Manage Jenkins -> configure system -> Global Pipeline Libraries -> Library Name
+
+
+// libraries -> func
+
+
+
+
+// environment -> parameters
+String Service = "${env.Service}"
+String releaseEnv = "${env.releaseEnv}"
+
+
+// config file
+def baseEnvConfig = libraryResource "com/ehome2/${releaseEnv}/conf/base.groovy"
+def serviceEnvConfig = libraryResource "com/ehome2/${releaseEnv}/conf/${Service}.groovy"
+def remote = [:]	
+
+//pipeline
+pipeline{
+    agent any
+    options {
+    timestamps() //日志会有时间
+    skipDefaultCheckout() //删除隐式checkout scm语句
+    disableConcurrentBuilds() //禁止并行
+    timeout(time: 1, unit: "HOURS") //流水线超时设置1h
+	}
+    stages{
+		stage("initial env"){  // initial env parmaters to global pipeline
+			steps{
+				script{
+					sh "echo \'${baseEnvConfig}\' > base.groovy" 
+					load 'base.groovy'
+					sh "echo \'${serviceEnvConfig}\' > service.groovy" 
+					load 'service.groovy'
+					//choice resources file 	
+					sh "rm -rf base.groovy service.groovy"
+					remote.name = remoteAddr
+					remote.host = remoteAddr
+					remote.allowAnyHosts = true
+					remote.fileTransfer = "scp"
+				}
+			}
+		}
+        stage("pull code"){  // pull code from gitlab 
+            steps{
+				script{
+				checkout([$class: 'GitSCM', 
+					branches: [[name: "${gitlab_branch}"]], 
+					doGenerateSubmoduleConfigurations: false, 
+					extensions: [], submoduleCfg: [], 
+					userRemoteConfigs: [[credentialsId: "${gitlab_auth}", 
+					url: "${gitlab_url}" ]]])
+				}
+           }
+        }
+		stage("deploy to nginx"){  //  deploy project to k8s server
+		    steps{
+		    	script{
+		    		withCredentials([sshUserPrivateKey(credentialsId: credentialsId, keyFileVariable: 'identity', passphraseVariable: '', usernameVariable: 'userName')]) {
+						remote.user = userName
+						remote.identityFile = identity
+						sshCommand remote: remote, command: "[[ -d ${remoteNginxPath} ]] && rm -rf ${remoteNginxPath}"
+						sshPut remote: remote, from: target_dir, into: remoteNginxPath
+						sshCommand remote: remote, command: "[[ -d ${remoteNginxPath} ]] && /usr/sbin/nginx -s reload || error ${remoteNginxPath} does not exists"
+		    		}
+		        }
+		    }
+		}
+    }
+}

@@ -1,0 +1,190 @@
+#!groovy
+@Library("jenkinslibrary") _    //jenkins: Manage Jenkins -> configure system -> Global Pipeline Libraries -> Library Name
+
+
+// libraries -> func
+def healthCheck = new org.devops.healthCheck()
+def harborSearch = new org.devops.harborSearch()
+def k8sSearch = new org.devops.k8sSearch()
+def tools = new org.devops.tools()
+
+// environment -> parameters
+String Service = "${env.Service}"
+String releaseEnv = "${env.releaseEnv}"
+if(env.gitlab_branch){
+    String gitlab_branch = "${env.gitlab_branch}"
+}
+
+
+
+// config file
+
+
+
+//pipeline
+pipeline{
+    agent any
+    options {
+    timestamps() //日志会有时间
+    skipDefaultCheckout() //删除隐式checkout scm语句
+    //disableConcurrentBuilds() //禁止并行
+    timeout(time: 1, unit: "HOURS") //流水线超时设置1h
+	}
+    stages{
+		stage("initial env"){  // initial env parmaters to global pipeline
+			steps{
+				script{
+					def baseEnvConfig = libraryResource "com/ehome2/${releaseEnv}/conf/base.groovy"
+					def serviceEnvConfig = libraryResource "com/ehome2/${releaseEnv}/conf/${Service}.groovy"
+					writeFile encoding: 'UTF-8', file: 'base.groovy', text: baseEnvConfig
+					writeFile encoding: 'UTF-8', file: 'service.groovy', text: serviceEnvConfig
+					load 'base.groovy'
+					load 'service.groovy'
+
+					//choice resources file 
+					switch(Service){
+						case [ "data-task" ]:
+					    	// yaml resources 
+						 	env.deploymentYamlFile = libraryResource "com/ehome2/${releaseEnv}/yaml/deployment-${Service}.yaml"
+							env.serviceYamlFile = libraryResource "com/ehome2/${releaseEnv}/yaml/service-${Service}.yaml"
+							// dockerfile resources
+							env.dockerFile = libraryResource "com/ehome2/${releaseEnv}/dockerfile/common.dockerfile"
+							// println
+							tools.PrintMes("${Service} use deployment-${Service}.yaml,service-${Service}.yaml,common.dockerfile","green")
+							break
+					    case ["urm-push","data-elsearch","data-gather","bd-recommend","bd-realtime-recommend","nlpchart-service","nlpchart-service-model"]:
+					    	// yaml resources 
+					        env.deploymentYamlFile = libraryResource "com/ehome2/${releaseEnv}/yaml/deployment-${Service}.yaml"
+							env.serviceYamlFile = libraryResource "com/ehome2/${releaseEnv}/yaml/service.yaml"
+							// dockerfile resources
+							env.dockerFile = libraryResource "com/ehome2/${releaseEnv}/dockerfile/common.dockerfile"
+							// println
+					    	tools.PrintMes("${Service} use deployment-${Service}.yaml,service.yaml,common.dockerfile","green")
+					    	break
+					    default:
+					    	// yaml resources 
+						 	env.deploymentYamlFile = libraryResource "com/ehome2/${releaseEnv}/yaml/deployment.yaml"
+							env.serviceYamlFile = libraryResource "com/ehome2/${releaseEnv}/yaml/service.yaml"
+							// dockerfile resources
+							env.dockerFile = libraryResource "com/ehome2/${releaseEnv}/dockerfile/common.dockerfile"
+							// println
+							tools.PrintMes("${Service} use deployment.yaml,service.yaml,common.dockerfile","green")
+							break
+					}	
+				}
+			}
+		}
+        stage("pull code"){  // pull code from gitlab 
+            when { 
+        		beforeAgent true
+        		anyOf { 
+        			environment name: 'status', value: 'SetImage'; 
+        			environment name: 'status', value: 'FirstRelease'
+        		} 
+        	}
+            steps{
+				script{
+					checkout([$class: 'GitSCM', 
+						branches: [[name: "${gitlab_branch}"]], 
+						doGenerateSubmoduleConfigurations: false, 
+						extensions: [], submoduleCfg: [], 
+						userRemoteConfigs: [[credentialsId: "${gitlab_auth}", 
+						url: "${gitlab_url}" ]]])
+				}
+           }
+        }
+        stage("maven build"){  // build target java project
+           	when { 
+        		beforeAgent true
+        		anyOf { 
+        			environment name: 'status', value: 'SetImage'; 
+        			environment name: 'status', value: 'FirstRelease'
+        		} 
+        	}
+        	steps{
+        		script{
+					dir("${target_dir}") {
+	        			sh "mvn clean package -Dmaven.test.skip=true"
+	       			}
+       			}
+        	}
+		}
+		stage("image build"){  // build target docker image and push to harbor
+	    	when { 
+        		beforeAgent true
+        		anyOf { 
+        			environment name: 'status', value: 'SetImage'; 
+        			environment name: 'status', value: 'FirstRelease'
+        		} 
+        	}
+		    steps{
+		    	script{
+		    		def Tag = "${sh(returnStdout: true, script: 'date +%Y%m%d%H%M%S')}".trim()
+		    		env.REPOSITORY="${harbor_host}/${NS}/${Service}:${Tag}"
+		        	withCredentials([usernamePassword(credentialsId: "${harbor_auth}", passwordVariable: 'harbor_password', usernameVariable: 'harbor_username')]) {
+         				dir("${target_dir}/target") {
+         					sh "echo \"${dockerFile}\" > dockerfile"
+				        	sh "docker login ${harbor_host} --username=${harbor_username} --password=${harbor_password}"
+				        	sh "docker build -t ${REPOSITORY} ${target_dir}/target/"
+				        	sh "docker push ${REPOSITORY}"
+				        	sh "docker rmi ${REPOSITORY}"
+			        	}
+					}
+		    	}
+		    }	
+		}    
+		stage("deploy project to k8s server"){  //  deploy project to k8s server
+		    steps{
+		    	script{
+					switch(status){
+					    case "SetImage":
+					    	dir("${target_dir}/target") {
+								sh "kubectl set image deployment ${Service} ${Service}=${REPOSITORY} --namespace=${NS} --record=true"
+						    	healthCheck.checkPodStatus(Service,NS)
+						    	healthCheck.checkSvcStatus(Service,NS,Port)
+					    	}
+						    
+						    break
+					    case "FirstRelease":
+					    	dir("${target_dir}/target") {
+					    		sh "echo \"${deploymentYamlFile}\" > deployment.yaml"
+					    		sh "echo \"${serviceYamlFile}\" > service.yaml"
+						    	deploymentStatus = k8sSearch.deploymentSearch(Service,NS)
+						    	if(deploymentStatus){
+						    	    tools.PrintMes("delete deployment/${Service} first","green1")
+						    	    sh "kubectl -n ${NS} delete deployment/${Service}"
+					    	 	}
+					    	    tools.PrintMes("create deployment ${Service}","green1")
+					    	    sh "kubectl apply -f deployment.yaml --record"
+					    	    healthCheck.checkPodStatus(Service,NS)
+						    	svcStatus = k8sSearch.serviceSearch(Service,NS)
+					    	    if(svcStatus){
+					    	        tools.PrintMes("delete svc/${Service} first","red")
+					    	        sh "kubectl -n ${NS} delete svc/${Service}"  
+				    	    	}
+				    	        tools.PrintMes("create svc/${Service}","green1")
+				    	        sh "kubectl apply -f service.yaml --record"
+				    	        healthCheck.checkSvcStatus(Service,NS,Port)
+					    	}
+						    break
+					    case "RollBack":
+					    	sh "kubectl -n ${NS} rollout undo deployment/${Service}"				    	
+							healthCheck.checkPodStatus(Service,NS)
+					    	break
+					    case "SpecificVersion":
+					    	if(SpecificV != ""){
+					    		if(harborSearch.searchTag(harbor_host,harbor_auth,NS,Service,SpecificV)){
+                  					num = k8sSearch.deploymentHistorySearch(SpecificV,Service,NS)
+                  					sh "kubectl -n ${NS} rollout undo deployment/${Service} --to-revision=${num}" 
+                  					healthCheck.checkPodStatus(Service,NS)
+              					}
+		    	             }else{
+		    	                 error "the parameter {SpecificV} is empty,please assign a value to SpecificV"
+		    	             }
+						    break
+					}
+		        }
+		    }
+		} 		
+    }
+}

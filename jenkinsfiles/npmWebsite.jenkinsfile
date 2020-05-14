@@ -1,0 +1,97 @@
+#!groovy
+@Library("jenkinslibrary") _    //jenkins: Manage Jenkins -> configure system -> Global Pipeline Libraries -> Library Name
+
+
+// libraries -> func
+def tools = new org.devops.tools()
+
+
+
+// environment -> parameters
+String Service = "${env.Service}"
+String releaseEnv = "${env.releaseEnv}"
+def remote = [:]	
+
+// config file
+def baseEnvConfig = libraryResource "com/ehome2/${releaseEnv}/conf/base.groovy"
+def serviceEnvConfig = libraryResource "com/ehome2/${releaseEnv}/conf/${Service}.groovy"
+
+
+//pipeline
+pipeline{
+    agent any
+    options {
+    timestamps() //日志会有时间
+    skipDefaultCheckout() //删除隐式checkout scm语句
+    disableConcurrentBuilds() //禁止并行
+    timeout(time: 1, unit: "HOURS") //流水线超时设置1h
+
+	}
+    stages{
+		stage("initial env"){  // initial env parmaters to global pipeline
+			steps{
+				script{
+					writeFile encoding: 'UTF-8', file: 'base.groovy', text: baseEnvConfig
+					load 'base.groovy'
+					writeFile encoding: 'UTF-8', file: 'service.groovy', text: serviceEnvConfig
+					load 'service.groovy'
+					//choice resources file 	
+					remote.name = remoteAddr
+					remote.host = remoteAddr
+					remote.allowAnyHosts = true
+				}
+			}
+		}
+        stage("pull code"){  // pull code from gitlab 
+            steps{
+				script{
+				checkout([$class: 'GitSCM', 
+					branches: [[name: "${gitlab_branch}"]], 
+					doGenerateSubmoduleConfigurations: false, 
+					extensions: [], submoduleCfg: [], 
+					userRemoteConfigs: [[credentialsId: "${gitlab_auth}", 
+					url: "${gitlab_url}" ]]])
+				}
+           }
+        }
+		stage("npm build"){  // build target docker image and push to harbor
+		    steps{
+		    	script{
+			    	nodejs(nodeJsName) {
+			    		dir(WORKSPACE){
+				    		sh "rm -f package-lock.json"
+				    		sh "npm install"
+							sh "npm run buildSafe"
+			    		}
+						dir(target_dir){
+							tools.PrintMes("检测是否存在dist.tar.gz","green")
+							sh "[[ -f ../dist.tar.gz ]] && rm -f ../dist.tar.gz"
+						    tools.PrintMes("打包中。。。","green")
+						    sh "tar -zcf ../dist.tar.gz ./*"
+						}
+					}
+		    	}
+		    }	
+		}    
+		stage("deploy to nginx"){  //  deploy project to k8s server
+		    steps{
+		    	script{
+		    		withCredentials([sshUserPrivateKey(credentialsId: credentialsId, keyFileVariable: 'identity', passphraseVariable: '', usernameVariable: 'userName')]) {
+						remote.user = userName
+						remote.identityFile = identity
+						//删除
+						sshCommand remote: remote, command: "[[ -d ${remoteNginxPath} ]] && rm -rf ${remoteNginxPath}/* || mkdir -p ${remoteNginxPath}"
+						//传输
+						sshPut remote: remote, from: "${target_dir}/../dist.tar.gz", into: remoteNginxPath
+						//解压,删除tar包,reload nginx
+						sshCommand remote: remote, command: """
+							tar xf ${remoteNginxPath}/dist.tar.gz -C ${remoteNginxPath}/ \
+							&& rm -f ${remoteNginxPath}/dist.tar.gz \
+							&& /usr/sbin/nginx -s reload
+							"""
+					}
+		        }
+		    }
+		}
+    }
+}
